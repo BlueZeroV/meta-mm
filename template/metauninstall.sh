@@ -1,6 +1,6 @@
 #!/system/bin/sh
 ############################################
-# mm-mm metauninstall.sh
+# meta-mm metauninstall.sh
 ############################################
 
 exit 0

@@ -10,6 +10,7 @@ NC='\033[0m'
 BASE_URL="https://github.com/7a72/meta-magic_mount/releases/download"
 UPDATE_JSON_URL="https://raw.githubusercontent.com/7a72/meta-magic_mount/public/update.json"
 CHANGELOG_URL="https://raw.githubusercontent.com/7a72/meta-magic_mount/public/changelog.md"
+MODULE_ID="org.zrlab.magic_mount"
 
 # Build state
 BUILD_TYPES=()
@@ -188,7 +189,7 @@ EOF
 build_binaries() {
     local build_type=$1
     
-    log_step 2 6 "Building binaries ($build_type)"
+    log_step 2 8 "Building binaries ($build_type)"
     
     cd src || return 1
     make clean > /dev/null 2>&1
@@ -209,7 +210,7 @@ configure_module() {
     local build_type=$2
     local version_code=$3
     
-    log_step 3 6 "Configuring module files"
+    log_step 3 8 "Configuring module files"
     
     # Configure module.prop
     local module_prop="$build_dir/module.prop"
@@ -220,11 +221,75 @@ configure_module() {
     
     local module_version="$VERSION_FULL"
     
+    sed -i "s|^id=.*|id=$MODULE_ID|" "$module_prop"
     sed -i "s|^version=.*|version=$module_version|" "$module_prop"
     sed -i "s|^versionCode=.*|versionCode=$version_code|" "$module_prop"
     sed -i "s|^updateJson=.*|updateJson=$UPDATE_JSON_URL|" "$module_prop"
     
     log_info "module.prop configured ($module_version, code $version_code)"
+}
+
+# Generate checksums for all files
+generate_checksums() {
+    local build_dir=$1
+    
+    log_step 5 8 "Generating checksums"
+    
+    local checksum_file="$build_dir/checksums"
+    
+    # Generate checksums (exclude checksums file itself if it exists)
+    if ! (cd "$build_dir" && \
+        find . -type f ! -name "checksums" -print0 | \
+        LC_ALL=C sort -z | \
+        xargs -0 sha256sum | \
+        sed 's|^\./||' > checksums); then
+        log_error "Failed to generate checksums"
+        return 1
+    fi
+    
+    local count=$(wc -l < "$checksum_file")
+    log_info "Generated checksums for $count files"
+}
+
+# Normalize timestamps for reproducible builds
+normalize_timestamps() {
+    local build_dir=$1
+    
+    log_step 6 8 "Normalizing timestamps for reproducible build"
+    
+    # Use git commit timestamp for reproducibility
+    local git_timestamp=$(git log -1 --format=%ct 2>/dev/null)
+    
+    if [ -n "$git_timestamp" ]; then
+        # Try GNU date first, then BSD date (macOS)
+        local timestamp=$(date -d "@$git_timestamp" '+%Y%m%d%H%M.%S' 2>/dev/null)
+        if [ -z "$timestamp" ]; then
+            # macOS compatibility
+            timestamp=$(date -r "$git_timestamp" '+%Y%m%d%H%M.%S' 2>/dev/null)
+        fi
+        
+        if [ -z "$timestamp" ]; then
+            log_error "Failed to convert git timestamp"
+            return 1
+        fi
+        
+        # Show human-readable commit time
+        local human_time=$(date -d "@$git_timestamp" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+        if [ -z "$human_time" ]; then
+            human_time=$(date -r "$git_timestamp" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+        fi
+        log_info "Using git commit time: $human_time"
+    else
+        timestamp=$(date '+%Y%m%d%H%M.%S')
+        log_warn "Git timestamp not available, using current time"
+    fi
+    
+    if ! find "$build_dir" -exec touch -m -t "$timestamp" {} +; then
+        log_error "Failed to normalize timestamps"
+        return 1
+    fi
+    
+    log_info "All timestamps normalized to: $timestamp"
 }
 
 # Build single type
@@ -252,7 +317,7 @@ build_single_type() {
     }
     
     # Step 1: Copy template
-    log_step 1 6 "Copying template"
+    log_step 1 8 "Copying template"
     if ! cp -r template/* "$build_dir/"; then
         log_error "Failed to copy template"
         return 1
@@ -265,7 +330,7 @@ build_single_type() {
     configure_module "$build_dir" "$build_type" "$version_code" || return 1
     
     # Step 4: Copy binaries
-    log_step 4 6 "Copying binaries"
+    log_step 4 8 "Copying binaries"
     if [ ! -d "src/bin" ]; then
         log_error "src/bin not found"
         return 1
@@ -275,21 +340,26 @@ build_single_type() {
         return 1
     fi
     
-    # Step 5: Package
-    log_step 5 6 "Creating package"
+    # Step 5: Generate checksums
+    generate_checksums "$build_dir" || return 1
+    
+    # Step 6: Normalize timestamps
+    normalize_timestamps "$build_dir" || return 1
+    
+    # Step 7: Package
+    log_step 7 8 "Creating package"
     if ! (cd "$build_dir" && zip -qr "../../build/$output_name" ./*); then
         log_error "Failed to create package"
         return 1
     fi
     
-    # Step 6: Generate misc for release
+    # Step 8: Generate misc for release
     if [ "$build_type" = "release" ]; then
-        log_step 6 6 "Generating misc"
-        # Generate changelog once
+        log_step 8 8 "Generating misc"
         generate_changelog
         generate_update_json "$output_name" "$version_code"
     else
-        log_step 6 6 "Skipping misc (debug build)"
+        log_step 8 8 "Skipping misc (debug build)"
     fi
     
     local size=$(du -h "build/$output_name" | cut -f1)

@@ -1,6 +1,6 @@
 #!/system/bin/sh
 ############################################
-# mm-mm uninstall.sh
+# meta-mm uninstall.sh
 # Cleanup script for metamodule removal
 ############################################
 
