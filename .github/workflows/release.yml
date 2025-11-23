@@ -50,7 +50,7 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          body_path: build/changelog.md
           files: |
             build/*.zip
 
@@ -66,5 +66,21 @@ jobs:
           cat build/update.json > update.json
           cat build/changelog.md > changelog.md
           git add update.json changelog.md
-          git commit -m "[skip ci] Update build json files"
+          git commit -m "[skip ci] Update build files"
           git push origin public
+
+      - name: Notify Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          TAG_NAME=${GITHUB_REF##*/}
+          CAPTION="*Release ${TAG_NAME}*"
+          RELEASE_FILE=$(find build -maxdepth 1 -type f -name "meta*release.zip")
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F parse_mode="Markdown" \
+            -F caption="$CAPTION" \
+            -F document=@"${RELEASE_FILE}"
+
