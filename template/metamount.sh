@@ -6,7 +6,7 @@
 MODDIR="${0%/*}"
 
 # Binary path (architecture-specific binary selected during installation)
-BINARY="$MODDIR/magic_mount"
+BINARY="$MODDIR/mmd"
 
 if [ ! -f "$BINARY" ]; then
     log "ERROR: Binary not found: $BINARY"

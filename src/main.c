@@ -1,4 +1,5 @@
 #include "magic_mount.h"
+#include "module_tree.h"
 #include "utils.h"
 
 #include <sys/types.h>
@@ -16,296 +17,336 @@
 
 #define DEFAULT_CONFIG_PATH "/data/adb/magic_mount/mm.conf"
 
+/* --- Configuration structure --- */
+typedef struct {
+    const char *module_dir;
+    const char *temp_dir;
+    const char *mount_source;
+    const char *log_file;
+    const char *partitions;
+    bool debug;
+} Config;
+
+/* --- Forward declarations --- */
+static void usage(const char *prog);
+static int load_config_file(const char *path, Config *cfg, MagicMount *ctx);
+static int parse_partitions(const char *list, MagicMount *ctx);
+static int setup_logging(const char *log_path);
+static void print_summary(const MagicMount *ctx);
+static void cleanup_resources(MagicMount *ctx);
+
+/* --- Helper function implementations --- */
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "Magic Mount Version: %s\n"
+            "Magic Mount: %s\n"
+            "\n"
             "Usage: %s [options]\n"
-            "  -m DIR     module dir (default: %s)\n"
-            "  -t DIR     temp dir   (default: auto rw tmpfs + \".magic_mount\")\n"
-            "  -s SRC     mount src  (default: %s)\n"
-            "  -p LIST    extra partitions, comma-separated (e.g. odm,mi_ext,my_stock)\n"
-            "  -l FILE    log file   (default: stderr, '-'=stdout)\n"
-            "  -c FILE    config file (default: " DEFAULT_CONFIG_PATH ")\n"
-            "  -v         enable debug logging (default: info)\n"
-            "  -h         help\n",
-            VERSION, prog, DEFAULT_MODULE_DIR,
-            DEFAULT_MOUNT_SOURCE);
+            "\n"
+            "Options:\n"
+            "  -m, --module-dir DIR      Module directory (default: %s)\n"
+            "  -t, --temp-dir DIR        Temporary directory (default: auto-detected)\n"
+            "  -s, --mount-source SRC    Mount source (default: %s)\n"
+            "  -p, --partitions LIST     Extra partitions (eg. odm,mi_ext,my_stock)\n"
+            "  -l, --log-file FILE       Log file (default: stderr, '-' for stdout)\n"
+            "  -c, --config FILE         Config file (default: %s)\n"
+            "  -v, --verbose             Enable debug logging\n"
+            "  -h, --help                Show this help message\n"
+            "\n",
+            VERSION, prog, DEFAULT_MODULE_DIR, DEFAULT_MOUNT_SOURCE,
+            DEFAULT_CONFIG_PATH);
 }
 
-static int enter_pid1_ns(void)
+static int load_config_file(const char *path, Config *cfg, MagicMount *ctx)
 {
-    int fd = open("/proc/1/ns/mnt", O_RDONLY);
-    if (fd < 0) {
-        LOGE("open /proc/1/ns/mnt: %s", strerror(errno));
-        return -1;
-    }
-
-    if (setns(fd, 0) < 0) {
-        LOGE("setns: %s", strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    close(fd);
-    LOGI("entered pid1 mnt ns");
-    return 0;
-}
-
-static char *str_trim(char *s)
-{
-    if (!s)
-        return s;
-
-    char *start = s;
-    while (*start && isspace((unsigned char)*start))
-        start++;
-
-    char *end = start + strlen(start);
-    while (end > start && isspace((unsigned char)end[-1]))
-        *--end = '\0';
-
-    return start;
-}
-
-static bool str_is_true(const char *v)
-{
-    if (!v)
-        return false;
-    if (!strcasecmp(v, "1") ||
-        !strcasecmp(v, "true") ||
-        !strcasecmp(v, "yes") ||
-        !strcasecmp(v, "on"))
-        return true;
-    return false;
-}
-
-static void load_config(const char *config_path,
-                        const char **tmp_dir_out,
-                        const char **log_path_out,
-                        bool *debug_out)
-{
-    FILE *fp = fopen(config_path, "r");
+    FILE *fp = fopen(path, "r");
     if (!fp) {
-        LOGD("config file %s not used: %s",
-             config_path, strerror(errno));
-        return;
+        if (errno != ENOENT) {
+            LOGW("config file %s: %s", path, strerror(errno));
+        }
+        return -1;
     }
 
-    LOGI("loading config file: %s", config_path);
+    LOGI("Loading config file: %s", path);
 
     char line[1024];
+    int line_num = 0;
+
     while (fgets(line, sizeof(line), fp)) {
-        char *p = line;
+        line_num++;
 
-        while (*p && isspace((unsigned char)*p))
-            p++;
+        str_trim(line);
 
-        if (*p == '\0' || *p == '\n' || *p == '#')
+        if (line[0] == '\0' || line[0] == '#')
             continue;
 
-        char *eq = strchr(p, '=');
+        char *eq = strchr(line, '=');
         if (!eq) {
+            LOGW("config:%d: invalid line (no '=')", line_num);
             continue;
         }
 
         *eq = '\0';
-        char *key = str_trim(p);
+        char *key = str_trim(line);
         char *val = str_trim(eq + 1);
-
-        size_t vlen = strlen(val);
-        if (vlen > 0 && (val[vlen - 1] == '\n' || val[vlen - 1] == '\r'))
-            val[vlen - 1] = '\0';
-        val = str_trim(val);
 
         if (*key == '\0' || *val == '\0')
             continue;
 
+        /* Process key-value pairs */
         if (!strcasecmp(key, "module_dir")) {
-            char *dup = strdup(val);
-            if (dup)
-                g_module_dir = dup;
+            cfg->module_dir = strdup(val);
+
         } else if (!strcasecmp(key, "temp_dir")) {
-            char *dup = strdup(val);
-            if (dup && tmp_dir_out)
-                *tmp_dir_out = dup;
+            cfg->temp_dir = strdup(val);
+
         } else if (!strcasecmp(key, "mount_source")) {
-            char *dup = strdup(val);
-            if (dup)
-                g_mount_source = dup;
-        } else if (!strcasecmp(key, "partitions")) {
-            const char *list = val;
-            const char *q = list;
-            while (*q) {
-                const char *start = q;
-                while (*q && *q != ',')
-                    q++;
-                size_t len = (size_t)(q - start);
-                add_extra_part_token(start, len);
-                if (*q == ',')
-                    q++;
-            }
+            cfg->mount_source = strdup(val);
+
         } else if (!strcasecmp(key, "log_file")) {
-            char *dup = strdup(val);
-            if (dup && log_path_out)
-                *log_path_out = dup;
+            cfg->log_file = strdup(val);
+
         } else if (!strcasecmp(key, "debug")) {
-            if (debug_out && str_is_true(val))
-                *debug_out = true;
+            cfg->debug = str_is_true(val);
+
+        } else if (!strcasecmp(key, "partitions")) {
+            cfg->partitions = strdup(val);
+
         } else {
-            LOGW("unknown config key: %s", key);
+            LOGW("config:%d: unknown key '%s'", line_num, key);
         }
     }
 
     fclose(fp);
+    return 0;
 }
 
+static int parse_partitions(const char *list, MagicMount *ctx)
+{
+    if (!list || !*list)
+        return 0;
+
+    const char *p = list;
+    while (*p) {
+        /* Find start of token */
+        while (*p && (*p == ',' || isspace((unsigned char)*p)))
+            p++;
+
+        if (!*p)
+            break;
+
+        const char *start = p;
+
+        /* Find end of token */
+        while (*p && *p != ',' && !isspace((unsigned char)*p))
+            p++;
+
+        size_t len = (size_t)(p - start);
+        if (len > 0) {
+            extra_partition_register(ctx, start, len);
+            LOGD("Added extra partition: %.*s", (int)len, start);
+        }
+    }
+
+    return 0;
+}
+
+static int setup_logging(const char *log_path)
+{
+    if (!log_path)
+        return 0;
+
+    FILE *fp = NULL;
+
+    if (!strcmp(log_path, "-")) {
+        fp = stdout;
+    } else {
+        fp = fopen(log_path, "a");
+        if (!fp) {
+            fprintf(stderr, "Error: Cannot open log file %s: %s\n",
+                    log_path, strerror(errno));
+            return -1;
+        }
+        /* Ensure log is line-buffered */
+        setvbuf(fp, NULL, _IOLBF, 0);
+    }
+
+    log_set_file(fp);
+    return 0;
+}
+
+static void print_summary(const MagicMount *ctx)
+{
+    LOGI("Summary");
+    LOGI("Modules processed:     %d", ctx->stats.modules_total);
+    LOGI("Nodes total:           %d", ctx->stats.nodes_total);
+    LOGI("Nodes mounted:         %d", ctx->stats.nodes_mounted);
+    LOGI("Nodes skipped:         %d", ctx->stats.nodes_skipped);
+    LOGI("Whiteouts:             %d", ctx->stats.nodes_whiteout);
+    LOGI("Failures:              %d", ctx->stats.nodes_fail);
+
+    if (ctx->failed_modules_count > 0) {
+        LOGE("Failed modules (%d):", ctx->failed_modules_count);
+        for (int i = 0; i < ctx->failed_modules_count; i++) {
+            LOGE("  - %s", ctx->failed_modules[i]);
+        }
+    } else {
+        LOGI("No module failures");
+    }
+}
+
+static void cleanup_resources(MagicMount *ctx)
+{
+    if (!ctx)
+        return;
+
+    magic_mount_cleanup(ctx);
+
+    if (g_log_file && g_log_file != stdout && g_log_file != stderr) {
+        fclose(g_log_file);
+        g_log_file = NULL;
+    }
+}
+
+/* --- Main function --- */
 int main(int argc, char **argv)
 {
-    const char *tmp_dir    = NULL;
-    const char *log_path   = NULL;
-    const char *config_path = DEFAULT_CONFIG_PATH;
-    char auto_tmp[PATH_MAX] = { 0 };
-    bool debug_from_cfg = false;
+    MagicMount ctx;
+    Config cfg = {0};
+    char auto_tmp[PATH_MAX] = {0};
 
-    for (int i = 1; i < argc; ++i) {
+    const char *config_path  = DEFAULT_CONFIG_PATH;
+    const char *tmp_dir      = NULL;
+    const char *cli_log_path = NULL;
+    bool cli_has_partitions  = false;
+    int rc;
+
+    magic_mount_init(&ctx);
+
+    for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
 
-        if ((strcmp(arg, "-c") == 0 || strcmp(arg, "--config") == 0) &&
-            i + 1 < argc) {
+        if ((!strcmp(arg, "-c") || !strcmp(arg, "--config")) && i + 1 < argc) {
             config_path = argv[++i];
         }
+        else if ((!strcmp(arg, "-l") || !strcmp(arg, "--log-file")) && i + 1 < argc) {
+            cli_log_path = argv[++i];
+        }
     }
 
-    load_config(config_path, &tmp_dir, &log_path, &debug_from_cfg);
-
-    if (debug_from_cfg) {
-        g_log_level = LV_DEBUG;
+    if (cli_log_path && setup_logging(cli_log_path) < 0) {
+        fprintf(stderr, "Error: Failed to setup logging to %s\n", cli_log_path);
+        return 1;
     }
 
-    for (int i = 1; i < argc; ++i) {
+    load_config_file(config_path, &cfg, &ctx);
+
+    if (!cli_log_path && cfg.log_file && setup_logging(cfg.log_file) < 0) {
+        fprintf(stderr, "Error: Failed to setup logging to %s\n", cfg.log_file);
+        return 1;
+    }
+
+    if (cfg.module_dir)
+        ctx.module_dir = cfg.module_dir;
+    if (cfg.mount_source)
+        ctx.mount_source = cfg.mount_source;
+    if (cfg.temp_dir)
+        tmp_dir = cfg.temp_dir;
+    if (cfg.debug)
+        log_set_level(LOG_DEBUG);
+
+    for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
 
-        if ((strcmp(arg, "-c") == 0 || strcmp(arg, "--config") == 0) &&
-            i + 1 < argc) {
-            ++i;
-            continue;
-        }
+        if ((!strcmp(arg, "-c") || !strcmp(arg, "--config")) && i + 1 < argc) { i++; continue; }
+        if ((!strcmp(arg, "-l") || !strcmp(arg, "--log-file")) && i + 1 < argc) { i++; continue; }
 
-        if ((strcmp(arg, "-m") == 0 ||
-             strcmp(arg, "--module-dir") == 0) &&
-            i + 1 < argc) {
-            g_module_dir = argv[++i];
+        if ((!strcmp(arg, "-m") || !strcmp(arg, "--module-dir")) && i + 1 < argc) {
+            ctx.module_dir = argv[++i];
 
-        } else if ((strcmp(arg, "-t") == 0 ||
-                    strcmp(arg, "--temp-dir") == 0) &&
-                   i + 1 < argc) {
+        } else if ((!strcmp(arg, "-t") || !strcmp(arg, "--temp-dir")) && i + 1 < argc) {
             tmp_dir = argv[++i];
 
-        } else if ((strcmp(arg, "-s") == 0 ||
-                    strcmp(arg, "--mount-source") == 0) &&
-                   i + 1 < argc) {
-            g_mount_source = argv[++i];
+        } else if ((!strcmp(arg, "-s") || !strcmp(arg, "--mount-source")) && i + 1 < argc) {
+            ctx.mount_source = argv[++i];
 
-        } else if ((strcmp(arg, "-l") == 0 ||
-                    strcmp(arg, "--log-file") == 0) &&
-                   i + 1 < argc) {
-            log_path = argv[++i];
+        } else if ((!strcmp(arg, "-l") || !strcmp(arg, "--log-file")) && i + 1 < argc) {
+            cfg.log_file = argv[++i];
 
         } else if (!strcmp(arg, "-v") || !strcmp(arg, "--verbose")) {
-            g_log_level = LV_DEBUG;
+            log_set_level(LOG_DEBUG);
 
-        } else if ((strcmp(arg, "-p") == 0 ||
-                    strcmp(arg, "--partitions") == 0) &&
-                   i + 1 < argc) {
-            const char *list = argv[++i];
-            const char *p = list;
-            while (*p) {
-                const char *start = p;
-                while (*p && *p != ',')
-                    p++;
-                size_t len = (size_t)(p - start);
-                add_extra_part_token(start, len);
-                if (*p == ',')
-                    p++;
+        } else if ((!strcmp(arg, "-p") || !strcmp(arg, "--partitions")) && i + 1 < argc) {
+            cli_has_partitions = true;
+            if (parse_partitions(argv[++i], &ctx) < 0) {
+                LOGE("failed to parse partitions");
+                cleanup_resources(&ctx);
+                return 1;
             }
 
         } else if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
             usage(argv[0]);
+            cleanup_resources(&ctx);
             return 0;
 
         } else {
-            fprintf(stderr, "Unknown arg: %s\n", arg);
+            fprintf(stderr, "Error: Unknown argument: %s\n\n", arg);
             usage(argv[0]);
+            cleanup_resources(&ctx);
             return 1;
         }
     }
 
-    if (log_path) {
-        if (!strcmp(log_path, "-")) {
-            g_log_file = stdout;
-        } else {
-            g_log_file = fopen(log_path, "a");
-            if (!g_log_file) {
-                fprintf(stderr, "open log %s: %s\n", log_path,
-                        strerror(errno));
-                return 1;
-            }
+    if (!cli_has_partitions && cfg.partitions) {
+        if (parse_partitions(cfg.partitions, &ctx) < 0) {
+            LOGW("failed to parse partitions from config");
+            cleanup_resources(&ctx);
+            return 1;
         }
     }
 
-    if (!tmp_dir) {
+    /* Determine temp directory */
+    if (!tmp_dir)
         tmp_dir = select_auto_tempdir(auto_tmp);
-    }
 
-    if (geteuid() != 0) {
-        LOGE("must run as root (euid=%d)", (int)geteuid());
-        if (g_log_file && g_log_file != stdout && g_log_file != stderr)
-            fclose(g_log_file);
-        free_string_array(&g_extra_parts, &g_extra_parts_count);
+    if (!tmp_dir || *tmp_dir == '\0') {
+        LOGE("failed to determine temp directory");
+        cleanup_resources(&ctx);
         return 1;
     }
 
-    if (enter_pid1_ns() != 0) {
-        if (g_log_file && g_log_file != stdout && g_log_file != stderr)
-            fclose(g_log_file);
-        free_string_array(&g_extra_parts, &g_extra_parts_count);
+    /* Validate environment */
+    if (root_check() < 0) {
+        cleanup_resources(&ctx);
         return 1;
     }
 
-    int rc = 0;
-
-    LOGI("starting magic_mount process: module_dir=%s temp_dir=%s "
-         "mount_source=%s log_level=%d",
-         g_module_dir, tmp_dir, g_mount_source, g_log_level);
-
-    rc = magic_mount(tmp_dir);
-
-    if (rc == 0) {
-        LOGI("magic_mount completed successfully");
-    } else {
-        LOGE("magic_mount failed with rc=%d "
-             "(check previous logs for details)",
-             rc);
-    }
-
-    LOGI("magic_mount summary: modules=%d nodes_total=%d mounted=%d "
-         "skipped=%d whiteouts=%d failures=%d",
-         g_stats.modules_total, g_stats.nodes_total, g_stats.nodes_mounted,
-         g_stats.nodes_skipped, g_stats.nodes_whiteout, g_stats.nodes_fail);
-
-    if (g_failed_modules_count > 0) {
-        LOGW("modules with failures (%d):", g_failed_modules_count);
-        for (int i = 0; i < g_failed_modules_count; ++i) {
-            LOGW("  failed module: %s", g_failed_modules[i]);
+    /* Log startup information */
+    LOGI("Magic Mount %s Starting", VERSION);
+    LOGI("Configuration:");
+    LOGI("  Module directory:  %s", ctx.module_dir);
+    LOGI("  Temp directory:    %s", tmp_dir);
+    LOGI("  Mount source:      %s", ctx.mount_source);
+    LOGI("  Log level:         %s", g_log_level == LOG_DEBUG ? "DEBUG" : "INFO");
+    if (ctx.extra_parts_count > 0) {
+        LOGI("  Extra partitions:  %d", ctx.extra_parts_count);
+        for (int i = 0; i < ctx.extra_parts_count; i++) {
+            LOGI("    - %s", ctx.extra_parts[i]);
         }
     }
 
-    if (g_log_file && g_log_file != stdout && g_log_file != stderr)
-        fclose(g_log_file);
+    /* Perform magic mount */
+    rc = magic_mount(&ctx, tmp_dir);
 
-    free_string_array(&g_failed_modules, &g_failed_modules_count);
-    free_string_array(&g_extra_parts, &g_extra_parts_count);
+    /* Print results */
+    if (rc == 0) {
+        LOGI("Magic Mount Completed Successfully");
+    } else {
+        LOGE("Magic Mount Failed (rc=%d)", rc);
+    }
+
+    print_summary(&ctx);
+    cleanup_resources(&ctx);
 
     return rc == 0 ? 0 : 1;
 }

@@ -1,19 +1,18 @@
 PROJECT = magic_mount
-VERSION  ?= v0.1.5
+VERSION  ?= v0.2.0
 
 # use zig cc
-ZIG      ?= zig
-CC       := $(ZIG) cc
+CC       := zig cc
 STRIPPER := strip
 
 # source files
-SRCS     := utils.c magic_mount.c main.c
+SRCS     := utils.c ksu.c module_tree.c magic_mount.c main.c
 
 # output directory
 OUTDIR   := bin
 
 # common flags
-CFLAGS_COMMON := -Wl,--gc-sections -static -Wpedantic -Werror
+CFLAGS_COMMON := -std=c23 -D_POSIX_C_SOURCE=200809L -Wl,--gc-sections -static -Wpedantic -Werror
 CFLAGS_COMMON += -DVERSION=\"$(VERSION)\"
 
 LDFLAGS_COMMON := -static

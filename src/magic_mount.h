@@ -1,19 +1,19 @@
 #ifndef MAGIC_MOUNT_H
 #define MAGIC_MOUNT_H
 
-#include <stdio.h>
-#include <stdint.h>
+#include <stddef.h>
 
 #define DISABLE_FILE_NAME      "disable"
 #define REMOVE_FILE_NAME       "remove"
 #define SKIP_MOUNT_FILE_NAME   "skip_mount"
 
-#define REPLACE_DIR_XATTR "trusted.overlay.opaque"
-#define REPLACE_DIR_FILE_NAME ".replace"
+#define REPLACE_DIR_XATTR      "trusted.overlay.opaque"
+#define REPLACE_DIR_FILE_NAME  ".replace"
 
-#define DEFAULT_MOUNT_SOURCE  "KSU"
-#define DEFAULT_MODULE_DIR    "/data/adb/modules"
+#define DEFAULT_MOUNT_SOURCE   "KSU"
+#define DEFAULT_MODULE_DIR     "/data/adb/modules"
 
+/* Mount statistics */
 typedef struct {
     int modules_total;
     int nodes_total;
@@ -23,31 +23,27 @@ typedef struct {
     int nodes_fail;
 } MountStats;
 
-extern MountStats g_stats;
+/* Core ctx */
+typedef struct MagicMount {
+    const char *module_dir;
+    const char *mount_source;
 
-extern const char *g_module_dir;
-extern const char *g_mount_source;
+    MountStats stats;
 
-extern char **g_failed_modules;
-extern int   g_failed_modules_count;
+    char **failed_modules;
+    int    failed_modules_count;
 
-extern char **g_extra_parts;
-extern int   g_extra_parts_count;
+    char **extra_parts;
+    int    extra_parts_count;
+} MagicMount;
 
-int magic_mount(const char *tmp_root);
+/* Initialization ctx (module_dir/mount_source) */
+void magic_mount_init(MagicMount *ctx);
 
-void add_extra_part_token(const char *start, size_t len);
+/* Main func */
+int  magic_mount(MagicMount *ctx, const char *tmp_root);
 
-// kernelsu api, atleast ones we care about
-#define KSU_INSTALL_MAGIC1 0xDEADBEEF
-#define KSU_INSTALL_MAGIC2 0xCAFEBABE
-
-struct ksu_add_try_umount_cmd {
-    uint64_t arg; // char ptr, this is the mountpoint
-    uint32_t flags; // this is the flag we use for it
-    uint8_t mode; // denotes what to do with it 0:wipe_list 1:add_to_list 2:delete_entry
-};
-
-#define KSU_IOCTL_ADD_TRY_UMOUNT _IOC(_IOC_WRITE, 'K', 18, 0)
+/* (failure module / extra_parts) */
+void magic_mount_cleanup(MagicMount *ctx);
 
 #endif /* MAGIC_MOUNT_H */

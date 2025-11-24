@@ -70,12 +70,12 @@ fi
 mkdir -p "$MODPATH" || abort "! Failed to create module directory"
 
 # Install the binary
-if ! cp "$TMPDIR/bin/$ARCH_BINARY" "$MODPATH/magic_mount"; then
+if ! cp "$TMPDIR/bin/$ARCH_BINARY" "$MODPATH/mmd"; then
     abort "! Failed to install binary"
 fi
 
 # Set executable permissions
-if ! chmod 755 "$MODPATH/magic_mount"; then
+if ! chmod 755 "$MODPATH/mmd"; then
     abort "! Failed to set binary permissions"
 fi
 
