@@ -270,9 +270,6 @@ int main(int argc, char **argv)
         } else if ((!strcmp(arg, "-s") || !strcmp(arg, "--mount-source")) && i + 1 < argc) {
             ctx.mount_source = argv[++i];
 
-        } else if ((!strcmp(arg, "-l") || !strcmp(arg, "--log-file")) && i + 1 < argc) {
-            cfg.log_file = argv[++i];
-
         } else if (!strcmp(arg, "-v") || !strcmp(arg, "--verbose")) {
             log_set_level(LOG_DEBUG);
 
